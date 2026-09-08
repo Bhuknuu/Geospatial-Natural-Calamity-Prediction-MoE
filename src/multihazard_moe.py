@@ -19,14 +19,8 @@ import time
 import math
 import random
 import platform
-import argparse
 import warnings
-import urllib.request
-import ssl
-import io
-import concurrent.futures
 from dataclasses import dataclass
-from abc import ABC, abstractmethod
 
 import numpy as np
 from PIL import Image
@@ -34,7 +28,7 @@ from PIL import Image
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import TensorDataset, DataLoader
 import torchvision.transforms as T
 import timm
 
@@ -76,36 +70,10 @@ def load_heatwave_satellite_data(path="data/satellite_heatwave_delhi_2023.npz"):
     """Load real NASA MODIS Land Surface Temperature (LST) daily satellite sequence."""
     if not os.path.exists(path) and os.path.exists("../" + path):
         path = "../" + path
-    if os.path.exists(path):
-        d = np.load(path, allow_pickle=True)
-        return d["images"], list(d["dates"])
-
-    print("[FETCH] Downloading NASA MODIS LST satellite sequence from NASA GIBS...")
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    dates = [f"2023-05-{day:02d}" for day in range(15, 32)] + [f"2023-06-{day:02d}" for day in range(1, 16)]
-
-    def fetch_scene(date_str):
-        url = (
-            f"https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&REQUEST=GetMap&"
-            f"LAYERS=MODIS_Terra_Land_Surface_Temp_Day&VERSION=1.3.0&FORMAT=image/png&WIDTH=64&HEIGHT=64&"
-            f"CRS=EPSG:4326&BBOX=27.0,76.0,30.0,79.0&TIME={date_str}"
-        )
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, context=ctx, timeout=8) as r:
-                im = Image.open(io.BytesIO(r.read())).convert("RGB")
-                return date_str, np.array(im)
-        except Exception:
-            return date_str, np.zeros((64, 64, 3), dtype=np.uint8)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        res = dict(ex.map(fetch_scene, dates))
-    images = np.stack([res[d] for d in dates])
-    os.makedirs("data", exist_ok=True)
-    np.savez_compressed("data/satellite_heatwave_delhi_2023.npz", images=images, dates=dates)
-    return images, dates
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Satellite data archive not found at {path}")
+    d = np.load(path, allow_pickle=True)
+    return d["images"], list(d["dates"])
 
 def make_satellite_sequences(images, seq_len=3, patch_size=32):
     """Normalize satellite imagery and extract spatiotemporal sliding windows."""
@@ -183,16 +151,12 @@ class CBAM(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(channels // r, channels, bias=False),
         )
-        self.spatial = nn.Conv2d(3 * channels, 1, kernel_size=7, padding=3, bias=False)
-        self.c1 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
-        self.c2 = nn.Conv2d(channels, channels, 5, padding=2, bias=False)
-        self.c3 = nn.Conv2d(channels, channels, 7, padding=3, bias=False)
+        self.spatial = nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False)
 
     def forward(self, x):
-        b, c, _, _ = x.shape
-        ca = torch.sigmoid(self.mlp(x.mean(dim=(2, 3))) + self.mlp(x.amax(dim=(2, 3)))).view(b, c, 1, 1)
+        ca = torch.sigmoid(self.mlp(x.mean(dim=(2, 3))) + self.mlp(x.amax(dim=(2, 3)))).unsqueeze(-1).unsqueeze(-1)
         x = x * ca
-        sa = torch.sigmoid(self.spatial(torch.cat([self.c1(x), self.c2(x), self.c3(x)], dim=1)))
+        sa = torch.sigmoid(self.spatial(torch.cat([x.mean(1, keepdim=True), x.amax(1, keepdim=True)], dim=1)))
         return x * sa
 
 class ECA(nn.Module):
@@ -215,9 +179,9 @@ def replace_se_with_eca(module):
             replace_se_with_eca(child)
 
 class DAMEfficientNet(nn.Module):
-    def __init__(self, num_classes=2, pretrained=False):
+    def __init__(self, num_classes=2, pretrained=True):
         super().__init__()
-        bb = timm.create_model("efficientnet_b0", pretrained=pretrained, num_classes=num_classes, drop_rate=0.2)
+        bb = timm.create_model("efficientnet_b0", pretrained=pretrained, num_classes=num_classes, drop_rate=0.3)
         self.stem = nn.Sequential(bb.conv_stem, bb.bn1)
         self.cbam = CBAM(bb.conv_stem.out_channels)
         replace_se_with_eca(bb.blocks)
@@ -227,29 +191,14 @@ class DAMEfficientNet(nn.Module):
         self.global_pool = bb.global_pool
         self.classifier = bb.classifier
 
-    def forward(self, x, return_features=False):
+    def forward(self, x, return_attention=False):
         feat = self.cbam(self.stem(x))
         out = self.classifier(self.global_pool(self.bn2(self.conv_head(self.blocks(feat)))))
-        return (out, feat) if return_features else out
+        return (out, feat) if return_attention else out
 
 # ---------------------------------------------------------------------------
 # 4. Production Benchmarking & End-to-End Execution
 # ---------------------------------------------------------------------------
-class ArrayDataset(Dataset):
-    def __init__(self, xs, ys, transform=None):
-        self.xs = torch.from_numpy(xs).float()
-        self.ys = torch.from_numpy(ys).long() if np.issubdtype(ys.dtype, np.integer) else torch.from_numpy(ys).float()
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.xs)
-
-    def __getitem__(self, idx):
-        x = self.xs[idx]
-        if self.transform:
-            x = self.transform(x)
-        return x, self.ys[idx]
-
 def benchmark_models():
     print_env_specs()
     print("\n[BENCHMARK] Measuring forward-pass throughput and GPU memory efficiency...")
@@ -309,12 +258,12 @@ def run_pipeline():
     x_tr_hw, y_tr_hw = xs[:split_hw], ys[:split_hw]
     x_va_hw, y_va_hw = xs[split_hw:], ys[split_hw:]
 
-    loader_hw_tr = DataLoader(ArrayDataset(x_tr_hw, y_tr_hw), batch_size=8, shuffle=True)
-    loader_hw_va = DataLoader(ArrayDataset(x_va_hw, y_va_hw), batch_size=8, shuffle=False)
+    loader_hw_tr = DataLoader(TensorDataset(torch.from_numpy(x_tr_hw).float(), torch.from_numpy(y_tr_hw).float()), batch_size=8, shuffle=True)
+    loader_hw_va = DataLoader(TensorDataset(torch.from_numpy(x_va_hw).float(), torch.from_numpy(y_va_hw).float()), batch_size=8, shuffle=False)
 
     hw = HeatwaveConvLSTM(in_channels=3).to(device)
     opt_hw = torch.optim.Adam(hw.parameters(), lr=1e-3)
-    scaler = torch.cuda.amp.GradScaler(enabled=AMP_ENABLED)
+    scaler = torch.amp.GradScaler("cuda", enabled=AMP_ENABLED)
 
     print("\n--- [1] Training ConvLSTM on Satellite Thermal Sequences ---")
     hw.train()
@@ -323,7 +272,7 @@ def run_pipeline():
         for xb, yb in loader_hw_tr:
             xb, yb = xb.to(device), yb.to(device)
             opt_hw.zero_grad()
-            with torch.cuda.amp.autocast(enabled=AMP_ENABLED):
+            with torch.amp.autocast("cuda", enabled=AMP_ENABLED):
                 pred = hw(xb)
                 loss = 0.7 * F.l1_loss(pred, yb) + 0.3 * F.mse_loss(pred, yb)
             scaler.scale(loss).backward()
@@ -348,13 +297,14 @@ def run_pipeline():
     x_tr_rd, y_tr_rd = scenes[:split_rd], labels[:split_rd]
     x_va_rd, y_va_rd = scenes[split_rd:], labels[split_rd:]
 
-    aug = T.Compose([T.RandomHorizontalFlip(), T.RandomVerticalFlip()])
-    loader_rd_tr = DataLoader(ArrayDataset(x_tr_rd, y_tr_rd, transform=aug), batch_size=16, shuffle=True)
-    loader_rd_va = DataLoader(ArrayDataset(x_va_rd, y_va_rd), batch_size=16, shuffle=False)
+    aug = T.Compose([T.RandomHorizontalFlip(), T.RandomVerticalFlip(), T.RandomRotation(degrees=15)])
+    loader_rd_tr = DataLoader(TensorDataset(torch.from_numpy(x_tr_rd).float(), torch.from_numpy(y_tr_rd).long()), batch_size=16, shuffle=True)
+    loader_rd_va = DataLoader(TensorDataset(torch.from_numpy(x_va_rd).float(), torch.from_numpy(y_va_rd).long()), batch_size=16, shuffle=False)
 
-    hail = DAMEfficientNet(num_classes=2).to(device)
-    opt_hail = torch.optim.AdamW(hail.parameters(), lr=1e-3, weight_decay=1e-2)
-    crit = nn.CrossEntropyLoss()
+    hail = DAMEfficientNet(num_classes=2, pretrained=True).to(device)
+    opt_hail = torch.optim.AdamW(hail.parameters(), lr=3e-4, weight_decay=1e-2)
+    sched_hail = torch.optim.lr_scheduler.CosineAnnealingLR(opt_hail, T_max=6)
+    crit = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     print("\n--- [2] Training DAM-EfficientNet on Real NEXRAD Radar Scenes ---")
     for ep in range(1, 7):
@@ -362,15 +312,18 @@ def run_pipeline():
         loss_acc, tr_corr = 0.0, 0
         for xb, yb in loader_rd_tr:
             xb, yb = xb.to(device), yb.to(device)
+            xb = aug(xb)
             opt_hail.zero_grad()
-            with torch.cuda.amp.autocast(enabled=AMP_ENABLED):
+            with torch.amp.autocast("cuda", enabled=AMP_ENABLED):
                 out = hail(xb)
                 loss = crit(out, yb)
             scaler.scale(loss).backward()
+            torch.nn.utils.clip_grad_norm_(hail.parameters(), 1.0)
             scaler.step(opt_hail)
             scaler.update()
             loss_acc += loss.item() * len(xb)
             tr_corr += (out.argmax(1) == yb).sum().item()
+        sched_hail.step()
 
         # Validation
         hail.eval()
@@ -398,37 +351,19 @@ def run_pipeline():
         spatial_extent: tuple
         valid_time: str
 
-    class HazardExpert(ABC):
-        @property
-        @abstractmethod
-        def name(self) -> str: ...
-        @abstractmethod
-        def predict(self, raw_input) -> HazardAlert: ...
+    def predict_satellite(x):
+        with torch.inference_mode():
+            pred = hw.eval()(torch.from_numpy(x).float().unsqueeze(0).to(device)).squeeze(0).cpu().numpy()
+        return HazardAlert("HEATWAVE", float(pred.mean()), 0.88, (27.0, 30.0, 76.0, 79.0), "next_day_thermal")
 
-    class HeatwaveHazardExpert(HazardExpert):
-        def __init__(self, m): self.m = m.eval()
-        @property
-        def name(self): return "Heatwave-ConvLSTM"
-        def predict(self, raw_input):
-            with torch.inference_mode():
-                t = torch.from_numpy(raw_input).float().unsqueeze(0).to(device)
-                pred = self.m(t).squeeze(0).cpu().numpy()
-            return HazardAlert("HEATWAVE", float(pred.mean()), 0.88, (27.0, 30.0, 76.0, 79.0), "next_day_thermal")
+    def predict_radar(x):
+        with torch.inference_mode():
+            probs = torch.softmax(hail.eval()(torch.from_numpy(x).float().unsqueeze(0).to(device)), dim=1)[0].cpu().numpy()
+        return HazardAlert("SEVERE_CONVECTIVE_HAIL", float(probs[1]), float(probs[int(probs.argmax())]), (32.0, 36.0, -98.0, -94.0), "nowcast_15min")
 
-    class RadarHazardExpert(HazardExpert):
-        def __init__(self, m): self.m = m.eval()
-        @property
-        def name(self): return "Radar-DAMEfficientNet"
-        def predict(self, raw_input):
-            with torch.inference_mode():
-                t = torch.from_numpy(raw_input).float().unsqueeze(0).to(device)
-                probs = torch.softmax(self.m(t), dim=1)[0].cpu().numpy()
-            sev = int(probs.argmax())
-            return HazardAlert("SEVERE_CONVECTIVE_HAIL", float(probs[1]), float(probs[sev]), (32.0, 36.0, -98.0, -94.0), "nowcast_15min")
-
-    experts = {"satellite": HeatwaveHazardExpert(hw), "radar": RadarHazardExpert(hail)}
-    a1 = experts["satellite"].predict(xs[0])
-    a2 = experts["radar"].predict(scenes[0])
+    experts = {"satellite": predict_satellite, "radar": predict_radar}
+    a1 = experts["satellite"](xs[0])
+    a2 = experts["radar"](scenes[0])
     print(f"  Alert 1 -> Hazard: {a1.hazard_type:20s} | Sev: {a1.severity_score:.3f} | Conf: {a1.confidence*100:5.1f}%")
     print(f"  Alert 2 -> Hazard: {a2.hazard_type:20s} | Sev: {a2.severity_score:.3f} | Conf: {a2.confidence*100:5.1f}%")
     print("=" * 65)
@@ -445,13 +380,10 @@ def smoke_test():
     print("[TEST] All model checks passed successfully.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Multi-Hazard MoE Geospatial Engine")
-    parser.add_argument("command", choices=["benchmark", "run-all", "smoke-test"], help="Execution mode")
-    args = parser.parse_args()
-
-    if args.command == "benchmark":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "run-all"
+    if cmd == "benchmark":
         benchmark_models()
-    elif args.command == "run-all":
-        run_pipeline()
-    elif args.command == "smoke-test":
+    elif cmd == "smoke-test":
         smoke_test()
+    else:
+        run_pipeline()
