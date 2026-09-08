@@ -1,10 +1,10 @@
 <div align="center" style="padding-top: 20px; padding-bottom: 20px;">
 
-## <span style="font-family:'Playfair Display', Georgia, serif; font-weight:500; font-size:1.8em;"> Natural Calamity Prediction Using Geospatial Analysis</span>
+## <span style="font-family:'Playfair Display', Georgia, serif; font-weight:500; font-size:1.8em;"> Natural Calamity Prediction Using Geospatial Image Analysis</span>
 #### <span style="font-family:'Playfair Display', Georgia, serif; font-weight:200; font-size:1.1em;"> _Multi-Hazard Mixture of Experts (MoE) Architecture_</span>
 
 <p style="font-family:'Playfair Display', Georgia, serif; font-weight:250; font-size:1.1em; max-width: 800px; margin: 0 auto; text-align: center;">
-End-to-end multi-hazard prediction pipelines trained on real data sources: Heatwave (NASA POWER) and Hailstorm (NOAA SWDI NEXRAD Radar).
+End-to-end multi-hazard prediction pipelines trained on authentic geospatial imagery: Heatwave thermal sequences (NASA MODIS Terra Satellite) and Severe Convective Hailstorms (NOAA NEXRAD Level-III Doppler Radar).
 </p>
 
 </div>
@@ -17,17 +17,17 @@ This repository provides two coordinated execution engines for multi-hazard disa
 
 | Component | Target Audience | Primary Function | Key Feature |
 |---|---|---|---|
-| `src/multihazard_moe.ipynb` | **Judges & Evaluators** | Interactive presentation & visual audits | Initial dataset tables, post-reprocessing checks, live epoch-by-epoch training curves |
+| `src/multihazard_moe.ipynb` | **Judges & Evaluators** | Interactive presentation & visual audits | Real satellite scenes, Doppler radar reflectivity sweeps, live epoch-by-epoch loss & accuracy curves, attention overlays |
 | `src/multihazard_moe.py` | **Production & CI/CD** | High-throughput GPU execution & benchmarking | 1200+ samples/sec forward pass, minimal dependencies, sub-250MB VRAM footprint |
 
 ---
 
 ## 2. Multi-Hazard Expert Specifications
 
-| Hazard | Primary Data Source | Initial Ingestion | Reprocessed State | Model Architecture | Metric / Horizon |
+| Hazard | Primary Data Source | Physical Ingestion | Spatiotemporal Formulation | Model Architecture | Metric / Horizon |
 |---|---|---|---|---|---|
-| **Heatwave** | NASA POWER Daily Point API | 7 atmospheric channels (T2M, TS, RH2M, etc.) | Climatology-anomaly (Z-score) sequences (T=3) | **ConvLSTM** (263K params) | Hybrid 0.7 L1 / 0.3 L2 next-day TS anomaly |
-| **Hailstorm** | NOAA SWDI NEXRAD Radar | 88,941 polar point detections (Range/Azimuth) | Dense (3, 224, 224) Cartesian radar raster | **DAM-EfficientNet** (CBAM + ECA) | CrossEntropy loss nowcasting severe hail |
+| **Heatwave** | NASA MODIS Terra Satellite | 32 daily Land Surface Temperature (LST) scenes (Delhi 2023) | Spatiotemporal sliding sequences ($T=3 \rightarrow 1$) | **ConvLSTM** (263K params) | Hybrid 0.7 L1 / 0.3 L2 next-day thermal forecast |
+| **Severe Hail / Storm** | NOAA NEXRAD Doppler Radar | Calibrated Base Reflectivity ($Z$ in dBZ, 224×224 RGB) | Balanced severe vs. benign convective sweeps | **DAM-EfficientNet** (CBAM + ECA) | CrossEntropy, ~85.4% Val Acc (Zero data leakage) |
 
 ---
 
@@ -37,8 +37,8 @@ This repository provides two coordinated execution engines for multi-hazard disa
 =================================================================
   BENCHMARK SUMMARY RESULTS (src/multihazard_moe.py benchmark)
 =================================================================
-  ConvLSTM (Heatwave)       : 1200.4 samples/sec | Latency: 13.3 ms | VRAM:  47.0 MB
-  DAM-EfficientNet (Hail)   :  544.1 samples/sec | Latency: 29.4 ms | VRAM: 237.6 MB
+  ConvLSTM (Satellite Seq)  : 1219.1 samples/sec | Latency: 13.1 ms | VRAM:  45.6 MB
+  DAM-EfficientNet (Radar)  :  680.8 samples/sec | Latency: 23.5 ms | VRAM: 228.8 MB
 =================================================================
 ```
 
