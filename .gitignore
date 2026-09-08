@@ -1,0 +1,40 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook checkpoints & empty workspaces
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+newSrc/
+notebooks/
+
+# Data directory & large dataset files (NOAA SWDI CSVs, POWER cache)
+data/
+*.csv
+*.npz
+*.parquet
+*.h5
+
+# Generated plot images and artifacts
+*.png
+*.jpg
+*.jpeg
+*.svg
+.dsh-vision-toolkit/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# IDE / Editor configuration
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
