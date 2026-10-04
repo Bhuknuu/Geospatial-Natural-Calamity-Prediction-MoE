@@ -1,0 +1,184 @@
+SMART INDIA HACKATHON 2026
+Problem Statement ID - SIH26209 Student Innovation
+
+Problem Statement Title - Student Innovation-Space
+technology refers to the application of engineering
+principles to the design, development, manufacture,
+and operation of devices and systems for space
+travel and exploration.
+Theme - Space Technology
+PS Category - Software
+Team ID - 177054
+Team Name - CookieBytes
+@SIH Idea submission
+
+1
+
+CookieBytes
+
+Nabh-Drishti :
+
+Geospatial Disaster Monitoring
+
+PROJECT ABSTRACT:
+An adaptive geospatial monitoring framework that intelligently routes heterogeneous satellite observations to specialized expert
+models for fast, scalable, and accurate detection and tracking of disaster-related changes across optical, SAR, and thermal data.
+PROPOSED SOLUTION:
+
+THE PROBLEM:
+
+Routed Mixture-of-Experts (MoE):
+Automatically parses multiconstellation satellite passes, routing
+specific orbital bands (SAR for surface
+deformation/water, MWIR/TIR for
+persistent thermal anomalies) to
+specialized expert heads.
+Geospatial Foundation Model
+Backbones: Leverages frozen PrithviEO and Prithvi-WxC representations,
+achieving high temporal and spatial
+transferability with low fine-tuning
+overhead.
+
+Orbital Data Glut: Earth observation
+constellations (Sentinel, INSAT, Landsat)
+generate terabytes of imagery every day..
+Manual processing creates fatal latency.
+Sensor Heterogeneity: Optical, SAR, and
+thermal radiometers require isolated
+pipelines, resulting in fragmented groundsegment software.
+Compute Bottlenecks: Running dense
+monolithic models on global 10m-30m
+raster tiles overloads ground-station
+servers.
+
+@SIH Idea submission
+
+2
+
+CookieBytes
+
+Technical Approach :
+
+Train offline (A), route live (B): confidence-aware pipeline
+
+!!!
+
+!!
+
+!
+
+DATA FETCHING
+FROM SATELLITE
+
+@SIH Idea submission
+
+3
+
+CookieBytes
+
+FEASIBILITY AND VIABILITY
+
+Technical Feasibility
+Built on openly released pre-trained models (Prithvi-EO, PrithviWxC), so no foundation-model pre-training is needed.
+Runs on free, open data: Sentinel-1/2, Landsat, MODIS/VIIRS,
+CHIRPS, ERA5, plus INSAT (MOSDAC) and Bhuvan for India.
+Public benchmarks exist for the experts: Sen1Floods11 (flood),
+Landslide4Sense (landslide), D-Fire (fire).
+The router activates only the relevant experts per tile, which keeps
+ground-station compute low.
+Challenges and Mitigation
+Cloud cover and night: SAR and thermal bands complement
+optical.
+Scarce labels: frozen backbones, light fine-tuning, public
+benchmarks.
+False alarms: per-expert confidence scores, cross-hazard fusion,
+and human review before any alert.
+Generalization: tested on events, regions and years never seen in
+training.
+@SIH Idea submission
+
+4
+
+CookieBytes
+
+IMPACT AND BENEFITS
+
+Impact:
+Disaster Management Agencies: Unified
+satellite intelligence for faster response
+decisions.
+Local Administration: Hazard-specific
+maps to identify vulnerable areas and
+prioritize evacuation.
+Communities: Clear, location-specific
+warnings through authorized channels.
+
+Benefits:
+Social: Supports timely evacuation and
+protection of lives and livestock.
+Economic: Helps reduce potential losses
+to infrastructure and agriculture.
+Environmental: Enables large-area
+monitoring of disaster and environmental
+changes.
+Operational: Hazard-aware routing
+enables scalable and efficient processing.
+
+Why our solution is different?
+One router replaces separate
+per-sensor pipelines, and new
+hazards plugin as new experts
+without retraining the whole
+system (MODULARITY).
+@SIH Idea submission
+
+5
+
+CookieBytes
+
+RESEARCH AND REFERENCES
+
+SOME OF THE PAPER as REFERENCES
+
+Geospatial foundation models for image analysis: evaluating and enhancing NASA-IBM Prithvi’s domain adaptability
+https://arxiv.org/pdf/2409.00489
+Application of Deep Learning Architectures for Satellite Image Time Series Prediction: A Review (ResearchGate)
+https://www.researchgate.net/publication/356679309
+Global weather forecasting through deep learning: applications and challenges (ScienceOpen)
+https://www.sciopen.com/article/10.26599/TRCN.2025.9550021
+Official / Government Data Sources (India):
+Global Satellite & Reanalysis Data
+IMD, Bhuvan (ISRO), GSI, NCS, India-WRIS / CWC, INCOIS, NRSC, FSI
+NASA MODIS / VIIRS: NDVI, LST, active-fire detection (FIRMS),
+Synthetic Aperture Radar (SAR) Specialization
+Aerosol Optical Depth
+Deep Learning Meets SAR: Concepts, Models, Pitfalls, and Perspectives
+Sentinel-1 (SAR) / Sentinel-2 (optical): ESA Copernicus program
+Benchmark Datasets & Repositories
+CHIRPS: satellite-derived rainfall
+Sen1Floods11: 11-event flood benchmark (Sentinel-1 SAR + hand-labeled
+ERA5 (Copernicus Climate Data Store): reanalysis: temperature,
+masks)
+wind, CAPE, soil moisture
+GRACE / GRACE-FO: groundwater anomaly
+DeepSARFlood 13-event set: used for ensemble diversity-selection validation
+SMAP (NASA): soil moisture
+Landslide4Sense / GVLM-S2: multi-region landslide benchmark (Japan,
+GLDAS: Global Land Data Assimilation System
+Nepal, Taiwan, India)
+INSAT-3D/3DR (via MOSDAC): geostationary imagery for
+NASA Global Landslide Catalog
+cyclone/hail
+D-Fire dataset: 21,000 labeled fire/smoke images, YOLO bounding-box format
+USGS: ANSS ComCat earthquake catalog, SRTM DEM, Landsat
+IBTrACS / JTWC / HURDAT: cyclone best-track datasets
+All our research and collected data: Miro Whiteboard
+GridSat: geostationary IR imagery (cyclone intensity, hail)
+MERRA-2: reanalysis grid used by Prithvi WxC
+Link to Protoype Repo: GitHub Repo
+
+@SIH Idea submission
+
+6
+
+

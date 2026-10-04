@@ -1,0 +1,953 @@
+bash
+
+cd /mnt/user-data/uploads && jupyter nbconvert --to script multihazard_moe.ipynb --stdout 2>/dev/null | head -500
+Output
+
+exit code 0
+bash
+
+cd /mnt/user-data/uploads && python3 -c "
+import json
+nb = json.load(open('multihazard_moe.ipynb'))
+print('nbformat', nb.get('nbformat'), nb.get('nbformat_minor'))
+print('num cells', len(nb['cells']))
+for i,c in enumerate(nb['cells']):
+    print('---CELL', i, c['cell_type'], '---')
+"
+Output
+
+nbformat 4 5
+num cells 15
+---CELL 0 markdown ---
+---CELL 1 code ---
+---CELL 2 markdown ---
+---CELL 3 code ---
+---CELL 4 markdown ---
+---CELL 5 code ---
+---CELL 6 markdown ---
+---CELL 7 code ---
+---CELL 8 markdown ---
+---CELL 9 code ---
+---CELL 10 markdown ---
+---CELL 11 code ---
+---CELL 12 markdown ---
+---CELL 13 code ---
+---CELL 14 code ---
+bash
+
+cd /mnt/user-data/uploads && python3 -c "
+import json
+nb = json.load(open('multihazard_moe.ipynb'))
+for i,c in enumerate(nb['cells']):
+    print('='*20, 'CELL', i, c['cell_type'], '='*20)
+    src = ''.join(c['source'])
+    print(src)
+    print()
+"
+Output
+
+==================== CELL 0 markdown ====================
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,600;1,400&display=swap');
+mark {
+  font-family: 'Playfair Display', Georgia, serif;
+  background-color: #fef08a;
+  color: #0f172a;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+</style>
+
+# <mark>Multi-Hazard Mixture of Experts (MoE)</mark>
+### <mark>Geospatial Calamity Prediction Using Real Spacecraft & Doppler Radar Imagery</mark>
+
+End-to-end multi-hazard calamity prediction operating directly on actual imagery: **NASA MODIS thermal satellite imagery** (Delhi Heatwave 2023) and **NOAA NEXRAD Doppler radar reflectivity scenes** (Severe Hail Outbreak).
+
+
+==================== CELL 1 code ====================
+import os
+import sys
+import time
+import math
+import random
+import platform
+import warnings
+
+import numpy as np
+from PIL import Image
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import TensorDataset, DataLoader
+import torchvision.transforms as T
+import timm
+
+warnings.filterwarnings('ignore', category=UserWarning)
+
+# Reproducibility Seed
+def seed_everything(seed=42):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+seed_everything(42)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+AMP_ENABLED = device.type == 'cuda'
+
+print('=' * 65)
+print('  SYSTEM & HARDWARE RUNTIME CONFIGURATION')
+print('=' * 65)
+print(f'  Python / OS  : {sys.version.split()[0]} ({platform.system()})')
+print(f'  PyTorch/CUDA : {torch.__version__} (CUDA: {torch.version.cuda or "N/A"})')
+print(f'  Device       : {device}')
+if torch.cuda.is_available():
+    print(f'  GPU Name     : {torch.cuda.get_device_name(0)}')
+    print(f'  VRAM Total   : {torch.cuda.get_device_properties(0).total_memory / (1024**3):.2f} GB')
+print('=' * 65)
+
+
+==================== CELL 2 markdown ====================
+## 1. Satellite Imagery Ingestion (NASA MODIS Terra LST)
+
+
+==================== CELL 3 code ====================
+# Load Real NASA MODIS Satellite Thermal Sequence
+hw_path = "data/satellite_heatwave_delhi_2023.npz"
+if not os.path.exists(hw_path) and os.path.exists("../" + hw_path):
+    hw_path = "../" + hw_path
+
+data_hw = np.load(hw_path, allow_pickle=True)
+satellite_images = data_hw["images"]  # (32, 64, 64, 3) uint8
+satellite_dates = list(data_hw["dates"])
+
+print("--- [1] REAL SATELLITE IMAGERY INGESTION INSPECTION ---")
+print("Satellite Sensor         : NASA Terra MODIS (Land Surface Temperature)")
+print(f"Sequence Tensor Shape    : {satellite_images.shape} (Days=32, H=64, W=64, Channels=3 RGB)")
+print("Geographic Bounding Box  : Lat [27.0°N, 30.0°N], Lon [76.0°E, 79.0°E]")
+print(f"Temporal Window          : {satellite_dates[0]} to {satellite_dates[-1]}")
+print("Thermal Scale (Delhi)    : Calibrated Land Surface Temp (22.0°C to 50.0°C)")
+
+def to_lst_celsius(raw_scene):
+    """Convert radiance to calibrated Land Surface Temperature (°C) with cloud masking."""
+    brightness = raw_scene[..., 0].astype(np.float32)
+    temp_c = 22.0 + (brightness / 255.0) * 28.0
+    cloud_mask = (raw_scene < 15).all(axis=-1)
+    temp_c[cloud_mask] = np.nan
+    return temp_c
+
+# Select 4 representative clear-sky dates across the 2023 Delhi Heatwave sequence
+sample_indices = [0, 5, 19, 26]
+stages = [
+    f"Onset: {satellite_dates[0]}",
+    f"Mid-May Heating: {satellite_dates[5]}",
+    f"Peak Heatwave: {satellite_dates[19]}",
+    f"Extreme Heat: {satellite_dates[26]}"
+]
+
+fig, axes = plt.subplots(1, 4, figsize=(18, 4.5))
+im_ref = None
+
+for ax, idx, title in zip(axes, sample_indices, stages):
+    scene = satellite_images[idx]
+    temp_map = to_lst_celsius(scene)
+    im_ref = ax.imshow(temp_map, cmap="inferno", vmin=25, vmax=50, extent=[76.0, 79.0, 27.0, 30.0])
+    ax.scatter([77.23], [28.61], color="cyan", edgecolors="white", s=70, zorder=5, marker="*")
+    ax.annotate("Delhi NCR", xy=(77.23, 28.61), xytext=(77.30, 28.75),
+                fontsize=9, fontweight="bold", color="white",
+                arrowprops=dict(arrowstyle="->", color="cyan", lw=1.2))
+    ax.set_title(title, fontsize=11, fontweight="bold", pad=8)
+    ax.set_xlabel("Longitude (°E)")
+    ax.set_ylabel("Latitude (°N)")
+    ax.grid(True, linestyle=":", alpha=0.3, color="white")
+
+cbar = fig.colorbar(im_ref, ax=axes, orientation="horizontal", fraction=0.045, pad=0.22)
+cbar.set_label("NASA MODIS Land Surface Temperature (°C) — Calibrated Geospatial Heatwave Spectrum", fontsize=11, fontweight="bold")
+plt.suptitle("NASA Terra MODIS Calibrated Satellite Thermal Scenes — Delhi NCR Heatwave May-June 2023", fontsize=13, y=1.05)
+plt.tight_layout()
+plt.show()
+
+
+==================== CELL 4 markdown ====================
+## 2. Spatiotemporal Sequence Formulation & Dataset
+
+
+==================== CELL 5 code ====================
+# Normalize to [0, 1] and extract spatiotemporal sequences
+norm_imgs = (satellite_images.astype(np.float32) / 255.0).transpose(0, 3, 1, 2)  # (32, 3, 64, 64)
+
+patch_size = 32
+patches = [
+    norm_imgs[:, :, 0:patch_size, 0:patch_size],
+    norm_imgs[:, :, 0:patch_size, patch_size:64],
+    norm_imgs[:, :, patch_size:64, 0:patch_size],
+    norm_imgs[:, :, patch_size:64, patch_size:64],
+    norm_imgs[:, :, 16:48, 16:48]
+]
+
+seq_len = 3
+xs_list, ys_list = [], []
+for p in patches:
+    for t in range(len(p) - seq_len):
+        xs_list.append(p[t : t + seq_len])
+        ys_list.append(p[t + seq_len])
+
+hw_xs = np.stack(xs_list)  # (145, 3, 3, 32, 32)
+hw_ys = np.stack(ys_list)  # (145, 3, 32, 32)
+
+split_hw = int(0.8 * len(hw_xs))
+x_tr_hw, y_tr_hw = hw_xs[:split_hw], hw_ys[:split_hw]
+x_va_hw, y_va_hw = hw_xs[split_hw:], hw_ys[split_hw:]
+
+print("--- [2] SPATIOTEMPORAL SATELLITE SEQUENCE VERIFICATION ---")
+print(f"Total Sequences Extracted: {len(hw_xs)} sequences")
+print(f"Input Tensor Shape (X)   : {hw_xs.shape} (Batch, T=3 days, C=3 RGB, H=32, W=32)")
+print(f"Target Tensor Shape (Y)  : {hw_ys.shape} (Batch, C=3 RGB, H=32, W=32)")
+print(f"Train / Validation Split : {len(x_tr_hw)} Training (80%) | {len(x_va_hw)} Validation (20%)")
+
+# Visualize an Actual Spatiotemporal Sequence: Input Frames (t-2, t-1, t) -> Target Frame (t+1)
+sample_seq_idx = 4
+fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+titles = ["Input: Frame t-2", "Input: Frame t-1", "Input: Frame t (Current)", "Target: Frame t+1 (Future)"]
+
+im_last = None
+for i in range(3):
+    img_frame = hw_xs[sample_seq_idx, i, 0] * 28.0 + 22.0  # Celsius scale
+    im_last = axes[i].imshow(img_frame, cmap="inferno", vmin=25, vmax=50, interpolation="bilinear")
+    axes[i].set_title(titles[i], fontsize=11, fontweight="bold")
+    axes[i].set_xlabel("Grid X (px)")
+    axes[i].set_ylabel("Grid Y (px)")
+
+target_frame = hw_ys[sample_seq_idx, 0] * 28.0 + 22.0
+axes[3].imshow(target_frame, cmap="inferno", vmin=25, vmax=50, interpolation="bilinear")
+axes[3].set_title(titles[3], fontsize=11, fontweight="bold", color="#b45309")
+axes[3].set_xlabel("Grid X (px)")
+axes[3].set_ylabel("Grid Y (px)")
+
+cbar = fig.colorbar(im_last, ax=axes, orientation="horizontal", fraction=0.045, pad=0.24)
+cbar.set_label("Land Surface Temperature (°C)", fontsize=10, fontweight="bold")
+plt.suptitle("Spatiotemporal Satellite Prediction Frame Sequence: 3-Day Thermal History -> 24h Ahead Forecast", fontsize=12, y=1.04)
+plt.tight_layout()
+plt.show()
+
+
+==================== CELL 6 markdown ====================
+## 3. Heatwave ConvLSTM Forecasting Model & Real Training Convergence
+
+
+==================== CELL 7 code ====================
+class ConvLSTMCell(nn.Module):
+    def __init__(self, in_channels, hidden_channels, kernel_size=3):
+        super().__init__()
+        self.hidden_channels = hidden_channels
+        self.conv = nn.Conv2d(in_channels + hidden_channels, 4 * hidden_channels, kernel_size, padding=kernel_size // 2)
+
+    def forward(self, x, h, c):
+        gates = self.conv(torch.cat([x, h], dim=1))
+        i, f, o, g = torch.chunk(gates, 4, dim=1)
+        c = torch.sigmoid(f) * c + torch.sigmoid(i) * torch.tanh(g)
+        h = torch.sigmoid(o) * torch.tanh(c)
+        return h, c
+
+    def init_state(self, b, h, w, dev):
+        shape = (b, self.hidden_channels, h, w)
+        return torch.zeros(shape, device=dev), torch.zeros(shape, device=dev)
+
+class HeatwaveConvLSTM(nn.Module):
+    def __init__(self, in_channels=3, hidden_channels=(32, 64)):
+        super().__init__()
+        self.cells = nn.ModuleList([
+            ConvLSTMCell(in_channels if i == 0 else hidden_channels[i - 1], hc)
+            for i, hc in enumerate(hidden_channels)
+        ])
+        self.project = nn.Conv2d(hidden_channels[-1], 3, kernel_size=1)
+
+    def forward(self, x):
+        b, t, c, h, w = x.shape
+        states = [cell.init_state(b, h, w, x.device) for cell in self.cells]
+        for step in range(t):
+            inp = x[:, step]
+            for i, cell in enumerate(self.cells):
+                hs, cs = cell(inp, states[i][0], states[i][1])
+                states[i] = (hs, cs)
+                inp = hs
+        return torch.sigmoid(self.project(states[-1][0]))
+
+# Native TensorDataset DataLoader
+hw_train_loader = DataLoader(TensorDataset(torch.from_numpy(x_tr_hw).float(), torch.from_numpy(y_tr_hw).float()), batch_size=8, shuffle=True)
+hw_val_loader = DataLoader(TensorDataset(torch.from_numpy(x_va_hw).float(), torch.from_numpy(y_va_hw).float()), batch_size=8, shuffle=False)
+
+hw_model = HeatwaveConvLSTM(in_channels=3).to(device)
+hw_optimizer = torch.optim.Adam(hw_model.parameters(), lr=1e-3, weight_decay=1e-4)
+hw_scaler = torch.amp.GradScaler("cuda", enabled=AMP_ENABLED)
+
+epochs_hw = 5
+hw_history = {"train": [], "val": []}
+
+print("=" * 72)
+print("  TRAINING HEATWAVE CONVLSTM: REAL METRIC LOGGING & LOSS REDUCTION")
+print("=" * 72)
+
+for epoch in range(1, epochs_hw + 1):
+    t_start = time.time()
+    hw_model.train()
+    tr_loss = 0.0
+    for xb, yb in hw_train_loader:
+        xb, yb = xb.to(device), yb.to(device)
+        hw_optimizer.zero_grad()
+        with torch.amp.autocast("cuda", enabled=AMP_ENABLED):
+            pred = hw_model(xb)
+            loss = 0.7 * F.l1_loss(pred, yb) + 0.3 * F.mse_loss(pred, yb)
+        hw_scaler.scale(loss).backward()
+        hw_scaler.step(hw_optimizer)
+        hw_scaler.update()
+        tr_loss += loss.item() * len(xb)
+
+    # Validation
+    hw_model.eval()
+    va_loss = 0.0
+    with torch.no_grad():
+        for xb, yb in hw_val_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            pred = hw_model(xb)
+            loss = 0.7 * F.l1_loss(pred, yb) + 0.3 * F.mse_loss(pred, yb)
+            va_loss += loss.item() * len(xb)
+
+    tr_mean = tr_loss / len(x_tr_hw)
+    va_mean = va_loss / len(x_va_hw)
+    delta = tr_mean - hw_history["train"][-1] if hw_history["train"] else 0.0
+    pct = (delta / hw_history["train"][-1] * 100) if hw_history["train"] else 0.0
+    hw_history["train"].append(tr_mean)
+    hw_history["val"].append(va_mean)
+    elapsed = time.time() - t_start
+    print(f"Epoch {epoch:2d}/{epochs_hw} | Train Loss: {tr_mean:.4f} | Val Loss: {va_mean:.4f} | Loss Δ: {delta:+.4f} ({pct:+.1f}%) | {elapsed:.2f}s")
+
+total_red = ((hw_history["train"][0] - hw_history["train"][-1]) / hw_history["train"][0]) * 100
+print("-" * 72)
+print(f"Convergence Summary: Initial Loss {hw_history['train'][0]:.4f} -> Final Loss {hw_history['train'][-1]:.4f} ({total_red:.1f}% reduction)")
+print("=" * 72)
+
+# Calamity Detection on Actual Satellite Images
+hw_model.eval()
+with torch.no_grad():
+    sample_x = torch.from_numpy(x_va_hw[0:1]).float().to(device)
+    pred_y = hw_model(sample_x).squeeze(0).cpu().numpy().transpose(1, 2, 0).clip(0, 1)
+    true_y = y_va_hw[0].transpose(1, 2, 0)
+    input_recent = x_va_hw[0, -1].transpose(1, 2, 0)
+
+# Localize Calamity Epicenter Bounding Box on Actual Predicted Scene
+gray_pred = pred_y[..., 0] * 28.0 + 22.0
+p90 = np.percentile(gray_pred, 85)
+y_idx, x_idx = np.where(gray_pred >= p90)
+ymin, ymax = max(0, int(np.percentile(y_idx, 2)) - 2), min(32, int(np.percentile(y_idx, 98)) + 2)
+xmin, xmax = max(0, int(np.percentile(x_idx, 2)) - 2), min(32, int(np.percentile(x_idx, 98)) + 2)
+
+fig, axes = plt.subplots(1, 4, figsize=(18, 4.5))
+im0 = axes[0].imshow(input_recent[..., 0] * 28.0 + 22.0, cmap="inferno", vmin=25, vmax=50)
+axes[0].set_title("Current Ground Truth (Day t)", fontsize=11, fontweight="bold")
+axes[0].set_xlabel("X Coordinate (px)")
+axes[0].set_ylabel("Y Coordinate (px)")
+
+axes[1].imshow(true_y[..., 0] * 28.0 + 22.0, cmap="inferno", vmin=25, vmax=50)
+axes[1].set_title("Future Ground Truth (Day t+1)", fontsize=11, fontweight="bold")
+axes[1].set_xlabel("X Coordinate (px)")
+axes[1].set_ylabel("Y Coordinate (px)")
+
+axes[2].imshow(pred_y[..., 0] * 28.0 + 22.0, cmap="inferno", vmin=25, vmax=50)
+axes[2].set_title("ConvLSTM Forecast (Day t+1)", fontsize=11, fontweight="bold", color="#2563eb")
+axes[2].set_xlabel("X Coordinate (px)")
+axes[2].set_ylabel("Y Coordinate (px)")
+
+axes[3].imshow(pred_y[..., 0] * 28.0 + 22.0, cmap="inferno", vmin=25, vmax=50)
+rect = patches.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin,
+                         linewidth=2.5, edgecolor="#ef4444", facecolor="none", linestyle="--")
+axes[3].add_patch(rect)
+axes[3].text(xmin + 1, ymin + 3, f"Heat Core >45°C\n[{xmin},{ymin},{xmax},{ymax}]",
+            fontsize=8, fontweight="bold", color="white",
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="#ef4444", alpha=0.85))
+axes[3].set_title("Calamity Epicenter Localization", fontsize=11, fontweight="bold", color="#dc2626")
+axes[3].set_xlabel("X Coordinate (px)")
+axes[3].set_ylabel("Y Coordinate (px)")
+
+cbar = fig.colorbar(im0, ax=axes, orientation="horizontal", fraction=0.045, pad=0.22)
+cbar.set_label("Land Surface Temperature (°C)", fontsize=10, fontweight="bold")
+plt.suptitle("NASA Terra MODIS Heatwave Forecast & Thermal Anomaly Localization (ConvLSTM)", fontsize=13, y=1.04)
+plt.tight_layout()
+plt.show()
+
+
+==================== CELL 8 markdown ====================
+## 4. Doppler Radar Ingestion (NOAA NEXRAD)
+
+
+==================== CELL 9 code ====================
+# Load Real NOAA NEXRAD Doppler Radar Reflectivity Scenes
+rd_path = "data/nexrad_radar_scenes.npz"
+if not os.path.exists(rd_path) and os.path.exists("../" + rd_path):
+    rd_path = "../" + rd_path
+
+data_rd = np.load(rd_path, allow_pickle=True)
+radar_scenes = data_rd["scenes"]  # (240, 224, 224, 3) uint8
+radar_labels = data_rd["labels"]  # (240,) int64
+
+print("--- [3] REAL DOPPLER RADAR DATASET INSPECTION ---")
+print("Sensor Platform          : NOAA NEXRAD National Doppler Radar Network")
+print(f"Radar Scene Tensor Shape : {radar_scenes.shape} (N_scenes=240, H=224, W=224, Channels=3 RGB)")
+print(f"Class Distribution       : {int((radar_labels == 1).sum())} Severe Convective Hail (50%) | {int((radar_labels == 0).sum())} Benign Weather (50%)")
+print("Reflectivity Scale       : Calibrated Base Reflectivity (dBZ: 10 to 65+)")
+
+# Select 3 Severe Hail Core scenes and 3 Benign Atmosphere scenes
+severe_idxs = [0, 2, 3]
+benign_idxs = [211, 183, 6]
+
+fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+
+def draw_radar_overlay(ax):
+    """Draw polar range rings (50km, 100km, 150km) and radar center crosshairs."""
+    h, w = 224, 224
+    cx, cy = w // 2, h // 2
+    for r in [35, 70, 105]:
+        circle = patches.Circle((cx, cy), r, fill=False, edgecolor="cyan", linestyle=":", lw=0.8, alpha=0.5)
+        ax.add_patch(circle)
+    ax.axhline(cy, color="cyan", linestyle=":", lw=0.6, alpha=0.3)
+    ax.axvline(cx, color="cyan", linestyle=":", lw=0.6, alpha=0.3)
+    ax.scatter([cx], [cy], color="cyan", s=25, marker="+", zorder=4)
+
+for i, idx in enumerate(severe_idxs):
+    axes[0, i].imshow(radar_scenes[idx])
+    draw_radar_overlay(axes[0, i])
+    axes[0, i].set_title(f"Severe Hail Core (Scene #{idx})\n[Active Convective Storm >55 dBZ]", fontsize=10, fontweight="bold", color="#dc2626")
+    axes[0, i].set_xlabel("Azimuthal Grid (px)")
+    axes[0, i].set_ylabel("Range Extent (px)")
+
+benign_descs = ["Stratiform Rain (25 dBZ)", "Light Showers (15 dBZ)", "Clear-Air Sweep (0 dBZ)"]
+for i, idx in enumerate(benign_idxs):
+    axes[1, i].imshow(radar_scenes[idx])
+    draw_radar_overlay(axes[1, i])
+    axes[1, i].set_title(f"Benign Atmosphere (Scene #{idx})\n[{benign_descs[i]}]", fontsize=10, fontweight="bold", color="#15803d")
+    axes[1, i].set_xlabel("Azimuthal Grid (px)")
+    axes[1, i].set_ylabel("Range Extent (px)")
+
+plt.suptitle("NOAA NEXRAD Level-III Doppler Radar Reflectivity: Severe Convective Storm vs Benign Atmosphere", fontsize=13, y=0.99)
+plt.tight_layout()
+plt.show()
+
+
+==================== CELL 10 markdown ====================
+## 5. Hail Hazard DAM-EfficientNet Model & Real Training Convergence
+
+
+==================== CELL 11 code ====================
+class CBAM(nn.Module):
+    def __init__(self, channels, r=16):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(channels, channels // r, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // r, channels, bias=False),
+        )
+        self.spatial = nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False)
+
+    def forward(self, x):
+        ca = torch.sigmoid(self.mlp(x.mean(dim=(2, 3))) + self.mlp(x.amax(dim=(2, 3)))).unsqueeze(-1).unsqueeze(-1)
+        x = x * ca
+        sa = torch.sigmoid(self.spatial(torch.cat([x.mean(1, keepdim=True), x.amax(1, keepdim=True)], dim=1)))
+        return x * sa
+
+class ECA(nn.Module):
+    def __init__(self, channels, gamma=2, b=1):
+        super().__init__()
+        k = max(int(abs((math.log2(channels) / gamma) + (b / gamma))), 3)
+        k = k if k % 2 == 1 else k + 1
+        self.conv = nn.Conv1d(1, 1, kernel_size=k, padding=k // 2, bias=False)
+
+    def forward(self, x):
+        y = x.mean(dim=(2, 3)).unsqueeze(1)
+        y = torch.sigmoid(self.conv(y)).squeeze(1).unsqueeze(-1).unsqueeze(-1)
+        return x * y
+
+def replace_se_with_eca(module):
+    for name, child in module.named_children():
+        if child.__class__.__name__ == "SqueezeExcite":
+            ch = child.conv_reduce.in_channels
+            setattr(module, name, ECA(ch))
+        else:
+            replace_se_with_eca(child)
+
+class DAMEfficientNet(nn.Module):
+    def __init__(self, num_classes=2, pretrained=True):
+        super().__init__()
+        bb = timm.create_model("efficientnet_b0", pretrained=pretrained, num_classes=num_classes, drop_rate=0.3)
+        self.stem = nn.Sequential(bb.conv_stem, bb.bn1)
+        self.cbam = CBAM(bb.conv_stem.out_channels)
+        replace_se_with_eca(bb.blocks)
+        self.blocks = bb.blocks
+        self.conv_head = bb.conv_head
+        self.bn2 = bb.bn2
+        self.global_pool = bb.global_pool
+        self.classifier = bb.classifier
+
+    def forward(self, x, return_attention=False):
+        feat = self.cbam(self.stem(x))
+        out = self.classifier(self.global_pool(self.bn2(self.conv_head(self.blocks(feat)))))
+        return (out, feat) if return_attention else out
+
+# Split Radar Scenes with Stratification & Augmentation
+norm_radar = (radar_scenes.astype(np.float32) / 255.0).transpose(0, 3, 1, 2)
+split_rd = int(0.8 * len(norm_radar))
+x_tr_rd, y_tr_rd = norm_radar[:split_rd], radar_labels[:split_rd]
+x_va_rd, y_va_rd = norm_radar[split_rd:], radar_labels[split_rd:]
+
+aug_radar = T.Compose([
+    T.RandomHorizontalFlip(),
+    T.RandomVerticalFlip(),
+    T.RandomRotation(degrees=15)
+])
+rd_train_loader = DataLoader(TensorDataset(torch.from_numpy(x_tr_rd).float(), torch.from_numpy(y_tr_rd).long()), batch_size=16, shuffle=True)
+rd_val_loader = DataLoader(TensorDataset(torch.from_numpy(x_va_rd).float(), torch.from_numpy(y_va_rd).long()), batch_size=16, shuffle=False)
+
+rd_model = DAMEfficientNet(num_classes=2, pretrained=True).to(device)
+rd_optimizer = torch.optim.AdamW(rd_model.parameters(), lr=3e-4, weight_decay=1e-2)
+rd_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(rd_optimizer, T_max=6)
+rd_scaler = torch.amp.GradScaler("cuda", enabled=AMP_ENABLED)
+rd_crit = nn.CrossEntropyLoss(label_smoothing=0.1)
+
+epochs_rd = 6
+rd_history = {"tr_loss": [], "va_loss": [], "tr_acc": [], "va_acc": []}
+
+print("=" * 72)
+print("  TRAINING DAM-EFFICIENTNET: REAL METRIC LOGGING & REGULARIZED GENERALIZATION")
+print("=" * 72)
+
+for epoch in range(1, epochs_rd + 1):
+    t_start = time.time()
+    rd_model.train()
+    tr_loss, tr_corr = 0.0, 0
+    for xb, yb in rd_train_loader:
+        xb, yb = xb.to(device), yb.to(device)
+        xb = aug_radar(xb)
+        rd_optimizer.zero_grad()
+        with torch.amp.autocast("cuda", enabled=AMP_ENABLED):
+            out = rd_model(xb)
+            loss = rd_crit(out, yb)
+        rd_scaler.scale(loss).backward()
+        torch.nn.utils.clip_grad_norm_(rd_model.parameters(), 1.0)
+        rd_scaler.step(rd_optimizer)
+        rd_scaler.update()
+        tr_loss += loss.item() * len(xb)
+        tr_corr += (out.argmax(1) == yb).sum().item()
+    rd_scheduler.step()
+
+    # Validation
+    rd_model.eval()
+    va_loss, va_corr = 0.0, 0
+    with torch.no_grad():
+        for xb, yb in rd_val_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            out = rd_model(xb)
+            loss = rd_crit(out, yb)
+            va_loss += loss.item() * len(xb)
+            va_corr += (out.argmax(1) == yb).sum().item()
+
+    tr_acc = tr_corr / len(x_tr_rd) * 100
+    va_acc = va_corr / len(x_va_rd) * 100
+    rd_history["tr_loss"].append(tr_loss / len(x_tr_rd))
+    rd_history["va_loss"].append(va_loss / len(x_va_rd))
+    rd_history["tr_acc"].append(tr_acc)
+    rd_history["va_acc"].append(va_acc)
+    elapsed = time.time() - t_start
+    print(f"Epoch {epoch:2d}/{epochs_rd} | Train Loss: {rd_history['tr_loss'][-1]:.4f} (Acc: {tr_acc:5.1f}%) | Val Loss: {rd_history['va_loss'][-1]:.4f} (Val Acc: {va_acc:5.1f}%) | {elapsed:.2f}s")
+
+total_rd_red = ((rd_history["tr_loss"][0] - rd_history["tr_loss"][-1]) / rd_history["tr_loss"][0]) * 100
+print("-" * 72)
+print(f"Convergence Summary: Initial Loss {rd_history['tr_loss'][0]:.4f} -> Final Loss {rd_history['tr_loss'][-1]:.4f} ({total_rd_red:.1f}% reduction) | Val Acc: {va_acc:.1f}%")
+print("=" * 72)
+
+# Calamity Detection on Actual Doppler Radar Scenes
+rd_model.eval()
+with torch.no_grad():
+    sample_severe = torch.from_numpy(x_va_rd[0:1]).float().to(device)
+    logits, feat = rd_model(sample_severe, return_attention=True)
+    probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
+    pred_class = int(probs.argmax())
+    conf = float(probs[pred_class])
+
+raw_radar_scene = radar_scenes[split_rd]
+h_rd, w_rd, _ = raw_radar_scene.shape
+active_echo = (raw_radar_scene > 50).any(axis=2)
+y_rd, x_rd = np.where(active_echo)
+if len(y_rd) > 0:
+    ymin_rd, ymax_rd = max(0, int(np.percentile(y_rd, 2)) - 5), min(h_rd, int(np.percentile(y_rd, 98)) + 5)
+    xmin_rd, xmax_rd = max(0, int(np.percentile(x_rd, 2)) - 5), min(w_rd, int(np.percentile(x_rd, 98)) + 5)
+else:
+    ymin_rd, ymax_rd, xmin_rd, xmax_rd = 0, h_rd, 0, w_rd
+
+benign_idx = 211  # Active benign stratiform precipitation scene
+raw_benign_scene = radar_scenes[benign_idx]
+
+fig, axes = plt.subplots(1, 3, figsize=(18, 5.5))
+
+axes[0].imshow(raw_benign_scene)
+draw_radar_overlay(axes[0])
+axes[0].set_title("Ground-Truth Benign Scene (#211)\n[Stratiform Rain, No Hail Threat]", fontsize=11, fontweight="bold", color="#15803d")
+axes[0].set_xlabel("Azimuthal Grid (px)")
+axes[0].set_ylabel("Range Extent (px)")
+
+axes[1].imshow(raw_radar_scene)
+draw_radar_overlay(axes[1])
+axes[1].set_title(f"Severe Convective Storm Ground-Truth\n[High Reflectivity Core]", fontsize=11, fontweight="bold")
+axes[1].set_xlabel("Azimuthal Grid (px)")
+axes[1].set_ylabel("Range Extent (px)")
+
+axes[2].imshow(raw_radar_scene)
+draw_radar_overlay(axes[2])
+rect_rd = patches.Rectangle((xmin_rd, ymin_rd), xmax_rd - xmin_rd, ymax_rd - ymin_rd,
+                             linewidth=2.5, edgecolor="#dc2626", facecolor="none", linestyle="--")
+axes[2].add_patch(rect_rd)
+axes[2].text(xmin_rd + 5, ymin_rd + 15, f"Mesocyclone Core >50 dBZ\n[Pred: SEVERE HAIL ({conf*100:.1f}%)]",
+             fontsize=9, fontweight="bold", color="white",
+             bbox=dict(boxstyle="round,pad=0.3", facecolor="#dc2626", alpha=0.9))
+axes[2].set_title("DAM-EfficientNet Calamity Epicenter Detection", fontsize=11, fontweight="bold", color="#dc2626")
+axes[2].set_xlabel("Azimuthal Grid (px)")
+axes[2].set_ylabel("Range Extent (px)")
+
+plt.suptitle("NOAA NEXRAD Radar Convective Storm Analysis & Epicenter Localization (DAM-EfficientNet)", fontsize=13, y=1.03)
+plt.tight_layout()
+plt.show()
+
+
+==================== CELL 12 markdown ====================
+## 6. Multi-Hazard MoE Router & Automated Custom Image Ingestion
+
+
+==================== CELL 13 code ====================
+# Automated Custom Image Ingestion, Modality Routing, Calamity Detection & Classification
+def analyze_custom_imagery(image_source, hw_model, hail_model):
+    '''
+    Ingests an arbitrary satellite or radar image file, automatically routes to the
+    specialized expert, detects the calamity region (bounding box), and classifies
+    Disaster vs Benign.
+    '''
+    if isinstance(image_source, str):
+        if not os.path.exists(image_source) and os.path.exists('../' + image_source):
+            image_source = '../' + image_source
+        im = Image.open(image_source).convert('RGB')
+        img_label = os.path.basename(image_source)
+    else:
+        im = Image.fromarray(image_source.astype(np.uint8)).convert('RGB')
+        img_label = 'Memory Image Array'
+    
+    arr = np.array(im)
+    h, w, _ = arr.shape
+    
+    # Automatic Modality Router: Doppler Radar vs Spacecraft Satellite
+    is_radar = (arr < 25).all(axis=2).mean() > 0.35 or 'radar' in img_label.lower() or 'nexrad' in img_label.lower()
+    modality = 'NOAA NEXRAD Doppler Radar' if is_radar else 'NASA Earth Observation Satellite'
+    
+    if is_radar:
+        inp = torch.from_numpy(np.array(im.resize((224, 224))).transpose(2, 0, 1)).float().unsqueeze(0).to(device) / 255.0
+        with torch.no_grad():
+            out, feat = hail_model(inp, return_attention=True)
+            probs = torch.softmax(out, dim=1)[0].cpu().numpy()
+        pred_class = int(probs.argmax())
+        conf = float(probs[pred_class])
+        is_disaster = pred_class == 1 or (arr > 50).any(axis=2).sum() > 200
+        hazard = 'SEVERE CONVECTIVE STORM / HAIL' if is_disaster else 'BENIGN STRATIFORM PRECIPITATION'
+        
+        # Detect Calamity Core (High dBZ Echoes)
+        active = (arr > 45).any(axis=2)
+        y, x = np.where(active)
+        if len(y) > 0:
+            ymin, ymax = max(0, int(np.percentile(y, 2)) - 5), min(h, int(np.percentile(y, 98)) + 5)
+            xmin, xmax = max(0, int(np.percentile(x, 2)) - 5), min(w, int(np.percentile(x, 98)) + 5)
+        else:
+            ymin, ymax, xmin, xmax = 0, h, 0, w
+    else:
+        inp_small = np.array(im.resize((32, 32))).astype(np.float32) / 255.0
+        seq = torch.from_numpy(np.stack([inp_small.transpose(2, 0, 1)]*3)).float().unsqueeze(0).to(device)
+        with torch.no_grad():
+            pred = hw_model(seq).squeeze(0).cpu().numpy()
+        severity = float(pred.mean())
+        is_disaster = severity > 0.35 or arr.mean() > 110
+        conf = min(0.98, float(arr.mean() / 255.0 + 0.3)) if is_disaster else 0.86
+        hazard = 'EXTREME HEATWAVE THERMAL INUNDATION' if is_disaster else 'NORMAL SURFACE TEMPERATURE REGIME'
+        
+        # Detect Calamity Epicenter (High Thermal Anomaly Cluster)
+        gray = arr.mean(axis=2)
+        p90 = np.percentile(gray, 90)
+        y, x = np.where(gray >= p90)
+        if len(y) > 0:
+            ymin, ymax = max(0, int(np.percentile(y, 2)) - 5), min(h, int(np.percentile(y, 98)) + 5)
+            xmin, xmax = max(0, int(np.percentile(x, 2)) - 5), min(w, int(np.percentile(x, 98)) + 5)
+        else:
+            ymin, ymax, xmin, xmax = 0, h, 0, w
+
+    bbox = (ymin, xmin, ymax, xmax)
+    status = 'DISASTER DETECTED' if is_disaster else 'BENIGN / NORMAL'
+    
+    return {
+        'label': img_label,
+        'modality': modality,
+        'hazard': hazard,
+        'status': status,
+        'is_disaster': is_disaster,
+        'confidence': conf,
+        'bbox': bbox,
+        'image': arr
+    }
+
+# Execute Automated Routing & Calamity Detection on Custom Images
+test_candidates = [
+    'data/test_gibs_modis.jpg',
+    'data/test_radar_patch.png',
+    'data/test_biparjoy.jpg'
+]
+
+results = []
+for p in test_candidates:
+    if os.path.exists(p) or os.path.exists('../' + p):
+        res = analyze_custom_imagery(p, hw_model, rd_model)
+        results.append(res)
+
+print('=' * 80)
+print('  AUTOMATED MULTI-HAZARD MOE ROUTING & CALAMITY CLASSIFICATION RESULTS')
+print('=' * 80)
+for r in results:
+    status_flag = '[!]' if r['is_disaster'] else '[OK]'
+    print(f"{status_flag} Image File   : {r['label']}")
+    print(f"    Modality     : {r['modality']}")
+    print(f"    Hazard Type  : {r['hazard']}")
+    print(f"    Status       : {r['status']} (Confidence: {r['confidence']*100:.1f}%)")
+    print(f"    Calamity Box : [ymin={r['bbox'][0]}, xmin={r['bbox'][1]}, ymax={r['bbox'][2]}, xmax={r['bbox'][3]}]")
+    print('-' * 80)
+
+# Visualize Calamity Detections on the Actual Ingested Images
+fig, axes = plt.subplots(len(results), 2, figsize=(12, 4.5 * len(results)))
+if len(results) == 1:
+    axes = np.expand_dims(axes, 0)
+
+for i, r in enumerate(results):
+    img = r['image']
+    ymin, xmin, ymax, xmax = r['bbox']
+    box_color = '#dc2626' if r['is_disaster'] else '#16a34a'
+    
+    # Column 1: Input image with detected bounding box
+    axes[i, 0].imshow(img)
+    rect = patches.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, linewidth=2.5, edgecolor=box_color, facecolor='none')
+    axes[i, 0].add_patch(rect)
+    badge = f"{r['status']} ({r['confidence']*100:.1f}%)"
+    axes[i, 0].text(xmin, max(ymin - 5, 12), badge, color='white', fontsize=8, fontweight='bold',
+                    bbox=dict(boxstyle='square,pad=0.25', facecolor=box_color, edgecolor='none'))
+    axes[i, 0].set_title(f"Input: {r['label']} [{r['modality']}]\nClassification: {r['hazard']}", fontsize=10, fontweight='bold')
+    axes[i, 0].axis('off')
+    
+    # Column 2: Zoomed-in Calamity Epicenter
+    patch = img[ymin:ymax, xmin:xmax]
+    axes[i, 1].imshow(patch)
+    axes[i, 1].set_title(f"Localized Calamity Region ({ymax-ymin}x{xmax-xmin} px)\nStatus: {r['status']}", fontsize=10, fontweight='bold', color=box_color)
+    axes[i, 1].axis('off')
+
+plt.suptitle('Automated Custom Image Ingestion: MoE Modality Routing, Calamity Region Detection & Disaster Classification', fontsize=13, y=1.01)
+plt.tight_layout()
+plt.show()
+
+
+==================== CELL 14 code ====================
+
+
+Reviewing a multi-hazard prediction model notebook in detail.
+
+Spotting a variable name collision breaking later plotting cells.
+
+Tracing how the shadowed name cascades across later cells.
+
+Checking mixed-precision settings for compatibility across devices.
+
+Uncovering flawed heuristics overriding the model's own predictions.
+
+Scanning smaller naming and workaround quirks across cells.
+
+bash
+
+ls -la /mnt/user-data/uploads/ 2>&1; echo "---"; find /mnt/user-data/uploads -type f 2>&1
+Output
+
+total 660
+drwxr-xr-x 1 claude ubuntu      0 Sep  8 12:42 .
+drwxr-xr-x 5 root   root     4096 Sep  8 12:42 ..
+-rw-r--r-- 1 claude ubuntu 671561 Sep  8 12:42 multihazard_moe.ipynb
+---
+/mnt/user-data/uploads/multihazard_moe.ipynb
+Inspecting a notebook for embedded output data.
+bash
+
+cd /mnt/user-data/uploads && python3 -c "
+import json
+nb = json.load(open('multihazard_moe.ipynb'))
+for i,c in enumerate(nb['cells']):
+    if c['cell_type']=='code':
+        outs = c.get('outputs',[])
+        print('CELL',i,'outputs:',len(outs))
+        for o in outs:
+            if o.get('output_type')=='stream':
+                print('  STREAM:', ''.join(o.get('text',[]))[:300])
+            elif o.get('output_type')=='error':
+                print('  ERROR:', o.get('ename'), o.get('evalue'))
+            elif o.get('output_type')=='execute_result':
+                print('  RESULT keys', list(o.get('data',{}).keys()))
+            elif o.get('output_type')=='display_data':
+                print('  DISPLAY keys', list(o.get('data',{}).keys()))
+"
+Output
+
+CELL 1 outputs: 1
+  STREAM: =================================================================
+  SYSTEM & HARDWARE RUNTIME CONFIGURATION
+=================================================================
+  Python / OS  : 3.12.10 (Windows)
+  PyTorch/CUDA : 2.6.0+cu124 (CUDA: 12.4)
+  Device       : cuda
+  GPU Name     : NVIDIA GeF
+CELL 3 outputs: 2
+  STREAM: --- [1] REAL SATELLITE IMAGERY INGESTION INSPECTION ---
+Satellite Sensor         : NASA Terra MODIS (Land Surface Temperature)
+Sequence Tensor Shape    : (32, 64, 64, 3) (Days=32, H=64, W=64, Channels=3 RGB)
+Geographic Bounding Box  : Lat [27.0°N, 30.0°N], Lon [76.0°E, 79.0°E]
+Temporal Window       
+  DISPLAY keys ['image/png', 'text/plain']
+CELL 5 outputs: 2
+  STREAM: --- [2] SPATIOTEMPORAL SATELLITE SEQUENCE VERIFICATION ---
+Total Sequences Extracted: 145 sequences
+Input Tensor Shape (X)   : (145, 3, 3, 32, 32) (Batch, T=3 days, C=3 RGB, H=32, W=32)
+Target Tensor Shape (Y)  : (145, 3, 32, 32) (Batch, C=3 RGB, H=32, W=32)
+Train / Validation Split : 116 Training (
+  DISPLAY keys ['image/png', 'text/plain']
+CELL 7 outputs: 3
+  STREAM: ========================================================================
+  TRAINING HEATWAVE CONVLSTM: REAL METRIC LOGGING & LOSS REDUCTION
+========================================================================
+Epoch  1/5 | Train Loss: 0.3351 | Val Loss: 0.1951 | Loss Δ: +0.0000 (+0.0%) | 0.44s
+Ep
+  ERROR: AttributeError 'list' object has no attribute 'Rectangle'
+  DISPLAY keys ['image/png', 'text/plain']
+CELL 9 outputs: 3
+  STREAM: --- [3] REAL DOPPLER RADAR DATASET INSPECTION ---
+Sensor Platform          : NOAA NEXRAD National Doppler Radar Network
+Radar Scene Tensor Shape : (240, 224, 224, 3) (N_scenes=240, H=224, W=224, Channels=3 RGB)
+Class Distribution       : 120 Severe Convective Hail (50%) | 120 Benign Weather (50%)
+Re
+  ERROR: AttributeError 'list' object has no attribute 'Circle'
+  DISPLAY keys ['image/png', 'text/plain']
+CELL 11 outputs: 3
+  STREAM: ========================================================================
+  TRAINING DAM-EFFICIENTNET: REAL METRIC LOGGING & REGULARIZED GENERALIZATION
+========================================================================
+Epoch  1/6 | Train Loss: 2.2697 (Acc:  51.6%) | Val Loss: 1.1393 (Val Acc:  
+  ERROR: AttributeError 'list' object has no attribute 'Circle'
+  DISPLAY keys ['image/png', 'text/plain']
+CELL 13 outputs: 3
+  STREAM: ================================================================================
+  AUTOMATED MULTI-HAZARD MOE ROUTING & CALAMITY CLASSIFICATION RESULTS
+================================================================================
+[!] Image File   : test_gibs_modis.jpg
+    Modality     : NASA Eart
+  ERROR: AttributeError 'list' object has no attribute 'Rectangle'
+  DISPLAY keys ['image/png', 'text/plain']
+CELL 14 outputs: 0
+Debugging a variable name collision breaking notebook cells.
+
+Scanning for fabricated confidence scores masking model logic.
+
+bash
+
+cd /home/claude && python3 -c "
+import importlib
+for pkg in ['torch','torchvision','timm','PIL','matplotlib','numpy']:
+    try:
+        m = importlib.import_module(pkg)
+        print(pkg, getattr(m,'__version__','?'))
+    except Exception as e:
+        print(pkg, 'MISSING', e)
+"
+Output
+
+torch MISSING No module named 'torch'
+torchvision MISSING No module named 'torchvision'
+timm MISSING No module named 'timm'
+PIL 12.1.1
+matplotlib 3.10.8
+numpy 2.4.4
+Checking available tools and network access for the setup.
+
+Weighing a full install against manual code review instead.
+
+Auditing patch code and mismatched threshold labels for bugs.
+
+Aligning threshold labels with actual computed percentile values.
+
+Making autocast and gradient scaling device-agnostic for portability.
+
+Reviewing the model architecture and attention module for defects.
+
+Spotting shared random augmentation applied across the batch.
+
+Applying per-sample augmentation and untangling confidence-blending logic.
+
+Deriving heatwave confidence from the model's own severity output.
+
+Fixing the contradiction between heuristic overrides and reported confidence.
+
+Adding a transparent auxiliary flag instead of silent overrides.
+
+Uncovering a missing shuffle behind the validation split.
+
+Spotting a hard-coded prediction label ignoring actual output.
+
+Weighing shuffling against sequential splits for time series.
+
+Implementing a stratified split with self-contained numpy code.
+
+Rewriting the demo section to pick a genuine severe example.
+
+Tracing a variable name collision causing crashes downstream.
+
+Compiling the empty-results guard and CPU compatibility fixes.
+
+Preparing to apply all fixes directly into the notebook file.
+
+Planning cell-by-cell edits to apply each fix.
+
+Drafting corrected code for each flagged notebook cell.
+
+Renaming variables to clarify percentile threshold logic.
+
+Rewriting the radar split to shuffle by class.
+
+Reapplying augmentation per sample within the training loop.
+
+Fixing a mislabeled sample and stale variable reference.
+
+Selecting a truly severe validation sample for the demo panel.
+
+Correcting the hardcoded label to reflect true predictions.
+
+Separating model verdicts from raw-pixel heuristic checks.
+
+Deriving heatwave confidence from severity relative to threshold.
+
+Adding an optional auxiliary flag without breaking output keys.
+
+Guarding empty results and finalizing notebook edits for each cell.
+
+bash
+
+mkdir -p /home/claude/work && cp /mnt/user-data/uploads/multihazard_moe.ipynb /home/claude/work/multihazard_moe_fixed.ipynb
+echo done
+Output

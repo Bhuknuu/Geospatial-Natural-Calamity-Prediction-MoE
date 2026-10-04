@@ -1,0 +1,51 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large Foundation Model Checkpoints (>100MB rejected by GitHub)
+models/*.pt
+models/*.pth
+models/*.bin
+models/*.onnx
+models/*.safetensors
+*.pt
+*.pth
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# Test artifacts and temporary plots
+test_cell*.png
+test_*.png
+*.tmp
+
+# Large raw datasets
+data/*.csv
+data/*.npz
+data/*.parquet
+data/*.h5
+data/Gemini_*.png
+
+# Keep historical preset samples for demo/verification
+!data/historical/
+!data/historical/*.jpg
+!data/historical/*.png
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# IDE / Editor configuration
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+.dsh-vision-toolkit/
